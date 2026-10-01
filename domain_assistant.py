@@ -250,20 +250,52 @@ class OpenAIGenerator:
             raise RuntimeError("OPENAI_API_KEY is missing from .env")
         if not self.model:
             raise RuntimeError("OPENAI_MODEL is missing from .env")
-        self.client = OpenAI(api_key=api_key)
+        base_url = os.getenv("OPENAI_BASE_URL", "").strip()
+        if not base_url and api_key.startswith("sk-or-"):
+            base_url = "https://openrouter.ai/api/v1"
+        self.client = OpenAI(api_key=api_key, base_url=base_url if base_url else None)
         self.max_output_tokens = max_output_tokens
+        self.is_openrouter = api_key.startswith("sk-or-") or "openrouter.ai" in (base_url or "")
 
     def generate(self, prompt: str) -> str:
-        response = self.client.responses.create(
-            model=self.model,
-            input=prompt,
-            temperature=0,
-            max_output_tokens=self.max_output_tokens,
-        )
-        answer = response.output_text.strip()
-        if not answer:
-            raise RuntimeError("OpenAI returned an empty answer")
-        return answer
+        for attempt in range(3):
+            if self.is_openrouter:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0,
+                    max_tokens=max(self.max_output_tokens, 1200),
+                )
+                msg = response.choices[0].message
+                answer = (msg.content or "").strip()
+                if not answer and hasattr(msg, "reasoning") and msg.reasoning:
+                    answer = str(msg.reasoning).strip()
+            else:
+                try:
+                    response = self.client.responses.create(
+                        model=self.model,
+                        input=prompt,
+                        temperature=0,
+                        max_output_tokens=self.max_output_tokens,
+                    )
+                    answer = response.output_text.strip()
+                except Exception:
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0,
+                        max_tokens=max(self.max_output_tokens, 1200),
+                    )
+                    msg = response.choices[0].message
+                    answer = (msg.content or "").strip()
+                    if not answer and hasattr(msg, "reasoning") and msg.reasoning:
+                        answer = str(msg.reasoning).strip()
+
+            if answer:
+                return answer
+            time.sleep(1)
+
+        raise RuntimeError("OpenAI returned an empty answer")
 
 
 @dataclass(frozen=True)
